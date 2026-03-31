@@ -71,13 +71,6 @@ class NeuralSwitchingGMM(nn.Module):
         new_state: Dict[str, torch.Tensor],
         prev_state: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
-        """
-        Рекуррентное обновление состояния с весами alpha.
-        Формула: theta_final = alpha * theta_new + (1 - alpha) * theta_prev
-        """
-        # alpha имеет shape [B, T, 1] — этого достаточно для broadcasting с [B, T, K]
-        # НЕ делаем unsqueeze(-1), чтобы не ломать размерности!
-        
         blended = {}
         for key in ['mu', 'logvar', 'logits']:
             blended[key] = (
@@ -85,24 +78,22 @@ class NeuralSwitchingGMM(nn.Module):
                 (1 - alpha) * prev_state[key]
             )
         
+        
         return blended
     
     def _compute_gmm_params(
         self,
         blended_state: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
-        """
-        Преобразование параметров из неограниченного пространства в валидные.
-        """
+        """Преобразование параметров с защитой от численной нестабильности"""
         params = {}
         
         # Средние: без изменений
         params['mu'] = blended_state['mu']  # [B, T, K]
-        
-        # Дисперсии: exp(logvar) гарантирует положительность
+
         params['sigma'] = torch.exp(0.5 * blended_state['logvar'])  # [B, T, K]
         
-        # Веса: softmax гарантирует сумму = 1
+        # Веса: softmax
         params['pi'] = F.softmax(blended_state['logits'], dim=-1)  # [B, T, K]
         
         return params
@@ -152,10 +143,9 @@ class NeuralSwitchingGMM(nn.Module):
         
         H(alpha) = -[alpha * log(alpha) + (1-alpha) * log(1-alpha)]
         """
-        alpha_clipped = torch.clamp(alpha, 1e-8, 1 - 1e-8)
         entropy = -(
-            alpha_clipped * torch.log(alpha_clipped) +
-            (1 - alpha_clipped) * torch.log(1 - alpha_clipped)
+            alpha * torch.log(alpha) +
+            (1 - alpha) * torch.log(1 - alpha)
         )
         return entropy
     
