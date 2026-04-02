@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 from neuralGMM import NeuralSwitchingGMM
 from typing import List, Tuple, Optional, Dict
@@ -18,8 +19,13 @@ def train_model(
         'total': [],
         'nll': [],
         'sparsity': [],
-        'entropy': [],
+        'binary': [],
+        'distance': []
     }
+    
+    # Сохраняем лучшую модель в памяти
+    best_loss = float('inf')
+    best_state_dict = None
     
     for epoch in range(n_epochs):
         epoch_losses = {k: 0.0 for k in history.keys()}
@@ -36,7 +42,6 @@ def train_model(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             
-            # Сбор статистики — ключи должны совпадать с outputs['losses']
             for k in epoch_losses.keys():
                 epoch_losses[k] += outputs['losses'][k].item()
             
@@ -45,13 +50,27 @@ def train_model(
         for k in history.keys():
             history[k].append(epoch_losses[k] / n_batches)
         
+        avg_total_loss = history['total'][-1]
+        
+        # Сохраняем копию весов лучшей модели в памяти
+        if avg_total_loss < best_loss:
+            best_loss = avg_total_loss
+            best_state_dict = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+        
         print(f"Epoch {epoch+1}/{n_epochs}: "
-                f"Loss={history['total'][-1]:.4f}, "
+                f"Loss={avg_total_loss:.4f}, "
                 f"NLL={history['nll'][-1]:.4f}, "
-                f"Sparsity={history['sparsity'][-1]:.4f}")
+                f"Sparsity={history['sparsity'][-1]:.4f}, "
+                f"Binary={history['binary'][-1]:.4f}",
+                f"Distance={history['distance'][-1]:.4f}"
+                )
     
-    return history
-
+    # Загружаем лучшие веса обратно в модель
+    if best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        model.to(device)
+    
+    return model, history, best_loss
 
 def diagnose_training(history: Dict[str, list]):
     """
