@@ -1,7 +1,0 @@
-README.md
-setup.py
-src/neuro_ews.egg-info/PKG-INFO
-src/neuro_ews.egg-info/SOURCES.txt
-src/neuro_ews.egg-info/dependency_links.txt
-src/neuro_ews.egg-info/requires.txt
-src/neuro_ews.egg-info/top_level.txt
