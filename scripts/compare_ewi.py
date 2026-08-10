@@ -1,0 +1,203 @@
+"""Compare the full pipeline (PF-ODE + one-sample MMD^2 + mixture-SR)
+against three baselines on the EWI (Gaussian mixture rotation) experiment,
+all evaluated on the exact same realized test series for a fair,
+apples-to-apples comparison:
+
+  Ours -- sr_lib.Detector on PF-ODE latents (one-sample MMD^2 vs N(0,I));
+          null is EXACT (injectivity theorem), no data needed to know it.
+  A    -- raw two-sample MMD^2, no encoder; null has NO known closed form
+          (same as ours in raw space), so it is standardised online via a
+          rolling mean/std of its own observed history and approximated
+          as N(0,1) -- an explicit approximation, not a theorem.
+  B    -- mean-embedding norm on the SAME PF-ODE latents; null is EXACT
+          (same injectivity argument as ours), just a weaker statistic.
+  C    -- raw Hotelling statistic (Mahalanobis dist. of window mean) + CUSUM;
+          null IS asymptotically known in closed form (chi2(d), classical
+          Hotelling's T^2 theory) -- no Monte Carlo needed for its threshold.
+
+Equal-footing rule: nothing here ever draws fresh samples from the *true*
+p0 generator for calibration. A and C's reference pool / null calibration
+use only the burn-in segment of THIS series (or a bootstrap of it) --
+exactly the information the problem setup grants (burn-in ~ p0, nothing
+else assumed known). Pilot calibration (delta, which sets DETECTION SPEED,
+not false-alarm validity) still uses an idealised true-p1 pilot pool for
+ours/A/B, consistent with how "ours" is pilot-calibrated everywhere else
+in this project (Appendix pilot-calibration).
+"""
+import pickle, time, os, sys
+import numpy as np
+import torch
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+from arch_lib import HistoryEncoder2D, DenoiserResidualLN, NoiseSchedule, ddim_encode_batch_v
+from sr_lib import Detector
+from baselines_lib import (GenericSRDetector, median_heuristic_sigma,
+                            make_two_sample_mmd_stat, mean_embedding_stat,
+                            RollingNormalizedSRDetector, RawCUSUMDetector)
+
+CKPT_DIR = os.path.join(SCRIPT_DIR, '..', 'checkpoints', 'ewi')
+RESULTS_DIR = os.path.join(SCRIPT_DIR, '..', 'results')
+FIGURES_DIR = os.path.join(SCRIPT_DIR, '..', 'figures')
+os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(FIGURES_DIR, exist_ok=True)
+device = torch.device('cpu')
+
+with open(f'{CKPT_DIR}/calib.pkl', 'rb') as f:
+    C = pickle.load(f)
+D, W_MMD, SIGMA_MMD = C['D'], C['W_MMD'], C['SIGMA_MMD']
+HIDDEN_ENC, HIDDEN_DEN, N_LAYERS = C['HIDDEN_ENC'], C['HIDDEN_DEN'], C['N_LAYERS']
+T_DIFF, BETA_MIN, BETA_MAX, N_DDIM = C['T_DIFF'], C['BETA_MIN'], C['BETA_MAX'], C['N_DDIM']
+
+encoder = HistoryEncoder2D(d_obs=D, hidden=HIDDEN_ENC).to(device)
+denoiser = DenoiserResidualLN(d=D, hidden=HIDDEN_DEN, context_dim=HIDDEN_ENC, n_layers=N_LAYERS).to(device)
+sched = NoiseSchedule(T_DIFF, BETA_MIN, BETA_MAX).to(device)
+encoder.load_state_dict(torch.load(f'{CKPT_DIR}/encoder.pt', map_location=device))
+denoiser.load_state_dict(torch.load(f'{CKPT_DIR}/denoiser.pt', map_location=device))
+encoder.eval(); denoiser.eval()
+h_fixed_kl = torch.from_numpy(np.load(f'{CKPT_DIR}/h_fixed_kl.npy'))
+
+NAME = 'Gaussian mixture rotation'
+SLUG = 'ewi_rotation'
+
+def sample_p0(n):
+    g1 = torch.randn(n, 2) + torch.tensor([-2., 0.])
+    g2 = torch.randn(n, 2) + torch.tensor([2., 0.])
+    m = torch.round(torch.rand(n, 1))
+    return m * g1 + (1 - m) * g2
+
+def sample_p1(n):
+    g1 = torch.randn(n, 2) + torch.tensor([0., -2.])
+    g2 = torch.randn(n, 2) + torch.tensor([0., 2.])
+    m = torch.round(torch.rand(n, 1))
+    return m * g1 + (1 - m) * g2
+
+def sample_p1_np(n): return sample_p1(n).numpy()
+
+def ddim(X0, ctx):
+    return ddim_encode_batch_v(X0, ctx, denoiser, sched, N_DDIM, device)
+
+TAU_VIS, L_VIS = 100, 200
+HORIZON = L_VIS - W_MMD
+P_FA = 0.05
+SEEDS = [42, 7, 1, 2, 3, 5, 11, 13, 21, 33]
+
+t_all0 = time.time()
+
+# ============================================================ "Ours" ======
+print('=== Ours (PF-ODE + one-sample MMD^2 + mixture-SR) -- exact null ===')
+det_ours = Detector(D, W_MMD, SIGMA_MMD)
+torch.manual_seed(99)
+Z_p1_pool = ddim(sample_p1(3000), h_fixed_kl)
+rng = np.random.default_rng(0)
+S_p1_ours = np.array([det_ours.mmd2(Z_p1_pool[rng.choice(3000, W_MMD, replace=False)]) for _ in range(500)])
+delta2_ours, v1_ours, alpha_ours = det_ours.fit_pilot(S_p1_ours)
+t0 = time.time()
+logA_ours = det_ours.calibrate_fast(HORIZON, n_sim=250, p_fa=P_FA)
+print(f'  pilot delta2={delta2_ours:.5f}  log(1+A*)={logA_ours:.3f}  ({time.time()-t0:.0f}s)')
+
+chosen = None
+for seed in SEEDS:
+    torch.manual_seed(seed)
+    hist = torch.cat([sample_p0(TAU_VIS), sample_p1(L_VIS - TAU_VIS)])
+    Z = ddim(hist, h_fixed_kl)
+    S_tilde, M_vals, tau_hat = det_ours.run_series(Z, TAU_VIS, logA_ours)
+    ok = (tau_hat is None) or (tau_hat >= TAU_VIS)
+    print(f'    seed={seed:3d} tau_hat={tau_hat} ok={ok}')
+    if tau_hat is not None and tau_hat >= TAU_VIS:
+        chosen = seed
+        break
+if chosen is None:
+    chosen = SEEDS[0]
+    torch.manual_seed(chosen)
+    hist = torch.cat([sample_p0(TAU_VIS), sample_p1(L_VIS - TAU_VIS)])
+    Z = ddim(hist, h_fixed_kl)
+    S_tilde, M_vals, tau_hat = det_ours.run_series(Z, TAU_VIS, logA_ours)
+print(f'  chosen seed={chosen}  tau_hat={tau_hat}  delay={None if tau_hat is None else tau_hat - TAU_VIS}')
+
+hist_np = hist.numpy()
+delay_ours = None if tau_hat is None else tau_hat - TAU_VIS
+results = dict(ours=dict(name='Ours (PF-ODE + MMD$^2$ + SR)', delta2=delta2_ours,
+                          logA=logA_ours, tau_hat=tau_hat, delay=delay_ours,
+                          M_vals=M_vals[W_MMD:]))
+
+# ==== The one and only "burn-in" A and C are allowed to see for calibration
+BURNIN_LEN = W_MMD
+burnin_sample = hist_np[:BURNIN_LEN]   # guaranteed pre-change by construction (tau=100 >> W_MMD)
+
+# ============================================================ Baseline A ==
+print('\n=== A: raw two-sample MMD^2, self-normalised online (no oracle p0) ===')
+sigma_A = median_heuristic_sigma(burnin_sample)
+stat_A = make_two_sample_mmd_stat(burnin_sample, sigma_A)
+
+t0 = time.time()
+det_A = RollingNormalizedSRDetector(roll_window=60, min_roll=10)
+rng_seed_A = np.random.default_rng(1)
+seed_u_A = [stat_A(burnin_sample[rng_seed_A.integers(0, BURNIN_LEN, W_MMD)]) for _ in range(20)]
+det_A.seed(seed_u_A)
+
+pilot_pool_A = sample_p1_np(3000)
+rng2 = np.random.default_rng(1)
+S_p1_A_raw = np.array([stat_A(pilot_pool_A[rng2.choice(3000, W_MMD, replace=False)]) for _ in range(500)])
+delta2_A, v1_A, alpha_A = det_A.fit_pilot(S_p1_A_raw)
+
+logA_A = det_A.calibrate_bootstrap(burnin_sample, stat_A, W_MMD, HORIZON, n_sim=250, p_fa=P_FA)
+print(f'  sigma={sigma_A:.3f}  pilot delta2(std)={delta2_A:.3f}  log(1+A*)={logA_A:.3f}  ({time.time()-t0:.0f}s)')
+
+windows_A = [hist_np[t - W_MMD:t] for t in range(W_MMD, L_VIS)]
+M_vals_A, tau_hat_rel_A = det_A.run_online(stat_A, windows_A)
+tau_hat_A = None if tau_hat_rel_A is None else tau_hat_rel_A + W_MMD
+delay_A = None if tau_hat_A is None else tau_hat_A - TAU_VIS
+print(f'  tau_hat={tau_hat_A}  delay={delay_A}')
+results['A'] = dict(name='A: raw two-sample MMD$^2$, self-norm + SR', delta2=delta2_A, logA=logA_A,
+                     tau_hat=tau_hat_A, delay=delay_A, M_vals=M_vals_A)
+
+# ============================================================ Baseline B ==
+print('\n=== B: mean-embedding norm on PF-ODE latents -- exact null ===')
+null_sampler_B = lambda rng_, w: rng_.standard_normal((w, D))
+t0 = time.time()
+det_B = GenericSRDetector(mean_embedding_stat, null_sampler_B, W_MMD, rng_seed=2, n_null=1500)
+rng3 = np.random.default_rng(2)
+S_p1_B = np.array([mean_embedding_stat(Z_p1_pool[rng3.choice(3000, W_MMD, replace=False)]) - det_B.MU0
+                   for _ in range(500)])
+delta2_B, v1_B, alpha_B = det_B.fit_pilot(S_p1_B)
+logA_B = det_B.calibrate(HORIZON, n_sim=250, p_fa=P_FA)
+print(f'  pilot delta2={delta2_B:.5f}  log(1+A*)={logA_B:.3f}  ({time.time()-t0:.0f}s)')
+
+windows_B = [Z[t - W_MMD:t] for t in range(W_MMD, L_VIS)]
+M_vals_B, tau_hat_rel_B = det_B.run_windows(windows_B, logA_B)
+tau_hat_B = None if tau_hat_rel_B is None else tau_hat_rel_B + W_MMD
+delay_B = None if tau_hat_B is None else tau_hat_B - TAU_VIS
+print(f'  tau_hat={tau_hat_B}  delay={delay_B}')
+results['B'] = dict(name='B: PF-ODE mean-embedding + SR', delta2=delta2_B, logA=logA_B,
+                     tau_hat=tau_hat_B, delay=delay_B, M_vals=M_vals_B)
+
+# ============================================================ Baseline C ==
+print('\n=== C: raw Hotelling statistic + CUSUM -- known chi2(d) null ===')
+t0 = time.time()
+det_C = RawCUSUMDetector(burnin_sample, W_MMD, D)
+h_C = det_C.calibrate_chi2(HORIZON, n_sim=2000, p_fa=P_FA)
+print(f'  slack k={det_C.k:.4f}  threshold h*={h_C:.3f}  ({time.time()-t0:.0f}s)')
+
+windows_C = [hist_np[t - W_MMD:t] for t in range(W_MMD, L_VIS)]
+g_vals_C, tau_hat_rel_C = det_C.run_windows(windows_C, h_C)
+tau_hat_C = None if tau_hat_rel_C is None else tau_hat_rel_C + W_MMD
+delay_C = None if tau_hat_C is None else tau_hat_C - TAU_VIS
+print(f'  tau_hat={tau_hat_C}  delay={delay_C}')
+results['C'] = dict(name='C: raw Hotelling + CUSUM (chi2 null)', delta2=None, logA=h_C,
+                     tau_hat=tau_hat_C, delay=delay_C, M_vals=g_vals_C)
+
+# ============================================================ Save ========
+out = dict(name=NAME, slug=SLUG, D=D, W_MMD=W_MMD, TAU=TAU_VIS, L=L_VIS,
+           p_fa=P_FA, horizon=HORIZON, seed=chosen, results=results,
+           hist_np=hist_np)
+out_path = os.path.join(RESULTS_DIR, f'compare_{SLUG}.pkl')
+with open(out_path, 'wb') as f:
+    pickle.dump(out, f)
+print(f'\nSaved {out_path}')
+print(f'Total time: {time.time()-t_all0:.0f}s')
+
+print('\n=== Summary ===')
+for key in ['ours', 'A', 'B', 'C']:
+    r = results[key]
+    print(f"  {r['name']:38s}  delay={str(r['delay']):>6}  tau_hat={str(r['tau_hat']):>6}")

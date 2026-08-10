@@ -1,0 +1,17 @@
+dataset,method,delta2,threshold,tau,tau_hat,delay
+Gaussian mixture rotation,Ours (PF-ODE + MMD$^2$ + SR),0.20736899980895954,24.874725104523115,100,116,16
+Gaussian mixture rotation,"A: raw two-sample MMD$^2$, self-norm + SR",6.571891306448717,20.47029718836129,100,109,9
+Gaussian mixture rotation,B: PF-ODE mean-embedding + SR,0.1270202921982336,9.619932968457277,100,34,-66
+Gaussian mixture rotation,C: raw Hotelling + CUSUM (chi2 null),,60.71775630350921,100,119,19
+Four clusters → one cluster,Ours (PF-ODE + MMD$^2$ + SR),0.0696750999669797,43.76035946336426,100,120,20
+Four clusters → one cluster,"A: raw two-sample MMD$^2$, self-norm + SR",3.9383253441574837,21.173637716610713,100,60,-40
+Four clusters → one cluster,B: PF-ODE mean-embedding + SR,-0.038846265061184576,nan,100,,
+Four clusters → one cluster,C: raw Hotelling + CUSUM (chi2 null),,60.71775630350921,100,58,-42
+Blob → Ring,Ours (PF-ODE + MMD$^2$ + SR),0.2672215534758513,27.05533107711717,100,118,18
+Blob → Ring,"A: raw two-sample MMD$^2$, self-norm + SR",16.39367964907326,16.360353434615504,100,119,19
+Blob → Ring,B: PF-ODE mean-embedding + SR,0.17118013001053525,9.736204001942678,100,33,-67
+Blob → Ring,C: raw Hotelling + CUSUM (chi2 null),,60.71775630350921,100,125,25
+MNIST digit 0 → 1,Ours (PF-ODE + MMD$^2$ + SR),0.09609145428702204,2.6759783689354832,62,67,5
+MNIST digit 0 → 1,"A: raw two-sample MMD$^2$, self-norm + SR",59.06417046414073,15.026036941482925,62,72,10
+MNIST digit 0 → 1,B: PF-ODE mean-embedding + SR,35.360478229867034,2.283019556011918,62,70,8
+MNIST digit 0 → 1,C: raw Hotelling + CUSUM (chi2 null),,503.72793206335945,62,23,-39

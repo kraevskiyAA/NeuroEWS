@@ -1,0 +1,31 @@
+# --- OS junk ---
+.DS_Store
+**/.DS_Store
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Trained model checkpoints (large binaries; regenerate via scripts/*_train.py) ---
+# includes downloaded third-party weights (e.g. checkpoints/mcvd_city32/checkpoint_900000.pt,
+# ~4.2GB -- would blow past GitHub's 100MB per-file limit) and local backup snapshots
+# (checkpoints/mnist_*k_backup/).
+checkpoints/
+
+# --- Downloaded / generated data (MNIST via torchvision, video clips, extracted
+# frames and latents -- all re-derivable from scripts, not source material) ---
+data/
+
+# --- Vendored third-party repos (cloned for experimentation, own nested .git /
+# weights; not part of this project's own code) ---
+external/
+
+# --- Misc caches ---
+.pytest_cache/
+.mypy_cache/
+*.log
